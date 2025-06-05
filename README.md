@@ -1,222 +1,161 @@
 # Birthday Greeting Service
 
-A serverless application that sends birthday greetings to users at 9am in their local timezone.
+A serverless application that sends birthday greetings to users on their birthday. Built with AWS Lambda, DynamoDB, and EventBridge Scheduler.
 
-## Architecture
+## Features
 
-The service uses AWS serverless services:
-- API Gateway for REST endpoints
-- Lambda for compute
-- DynamoDB for data storage
-- EventBridge Scheduler for timezone-aware scheduling
-- SQS for dead letter queue
-- Pipedream RequestBin for webhook testing
+- User management (create, update, delete)
+- Automatic birthday message scheduling
+- Timezone-aware message delivery (sends at 9 AM in user's local timezone)
+- Message delivery tracking
+- Webhook integration for sending messages
+- LocalStack support for local development
 
-### Key Features
-- Timezone-aware scheduling using EventBridge Scheduler
-- Automatic validation of IANA timezone identifiers
-- Message delivery tracking with retry mechanism
-- Efficient birthday querying using DynamoDB GSI
-- Automatic cleanup of old message logs using DynamoDB TTL
+## Prerequisites
 
-## Getting Started
+- Node.js v20.x or later
+- Docker (for LocalStack)
+- AWS CLI (for local development)
+- npm or yarn
 
-### Prerequisites
-- Node.js v20+
-- AWS Account
-- AWS CLI configured with appropriate credentials
-- Serverless Framework (`npm install -g serverless`)
-- Pipedream account for RequestBin (free tier available)
-
-### Environment Setup
-
-1. Copy `.env.example` to `.env`:
-```bash
-cp .env.example .env
-```
-
-2. Update `.env` with your values:
-```bash
-# AWS Configuration
-AWS_REGION=us-east-1
-AWS_PROFILE=default
-
-# DynamoDB Tables (will be created during deployment)
-USERS_TABLE=birthday-service-users
-MESSAGE_LOGS_TABLE=birthday-service-logs
-
-# Webhook Configuration
-WEBHOOK_ENDPOINT=https://YOUR_REQUESTBIN_URL.pipedream.net  # Get this from Pipedream
-
-# These will be available after first deployment
-BIRTHDAY_SENDER_LAMBDA_ARN=  # Leave empty for first deployment
-SCHEDULER_ROLE_ARN=          # Leave empty for first deployment
-```
-
-### Installation
+## Local Development Setup
 
 1. Install dependencies:
 ```bash
 npm install
 ```
 
-2. Deploy to AWS:
+2. Start the development environment:
 ```bash
-npm run deploy -- --stage prod
+npm run dev
 ```
 
-3. After deployment, update `.env` with the generated Lambda ARN and Role ARN from the deployment output.
+This command will:
+- Start LocalStack with required services (DynamoDB, EventBridge, Scheduler)
+- Create necessary DynamoDB tables
+- Start the serverless offline server
 
-### Testing the Service
+The server will start at `http://localhost:3000` with the following endpoints:
+- POST `/local/users` - Create a new user
+- PUT `/local/users/{userId}` - Update a user
+- DELETE `/local/users/{userId}` - Delete a user
+- POST `/local/birthday/daily` - Trigger daily birthday check
+- POST `/local/birthday/send` - Manually trigger birthday message
 
-1. Create a RequestBin endpoint:
-   - Go to https://pipedream.com/requestbin
-   - Sign up/Login to Pipedream
-   - Click "Create Source"
-   - Select "HTTP / Webhook" as the trigger
-   - Copy the generated URL to your `.env` file as WEBHOOK_ENDPOINT
+### Alternative Setup (Manual Steps)
 
-2. Create a test user with today's date as birthday:
+If you prefer to run each step manually:
+
+1. Start LocalStack:
 ```bash
-curl -X POST https://your-api-url/users -H "Content-Type: application/json" -d '{
-  "firstName": "Test",
-  "lastName": "User",
-  "birthday": "YYYY-MM-DD",  # Use today's date
-  "location": "America/New_York"
-}'
+npm run start:localstack
 ```
 
-3. The service will automatically:
-   - Find users with birthdays today
-   - Schedule messages for 9am in their local timezone
-   - Send birthday greetings to your RequestBin endpoint
-
-4. Monitor message delivery in your Pipedream dashboard
-
-### API Endpoints
-
-#### Create User
+2. Setup local resources:
 ```bash
-POST /users
-Content-Type: application/json
-
-{
-  "firstName": "John",
-  "lastName": "Doe",
-  "birthday": "1990-01-15",
-  "location": "America/New_York"  # Must be valid IANA timezone identifier
-}
+npm run setup:local
 ```
 
-Response:
-```json
-{
-  "userId": "123e4567-e89b-12d3-a456-426614174000",
-  "firstName": "John",
-  "lastName": "Doe",
-  "birthday": "1990-01-15",
-  "location": "America/New_York",
-  "birthdayMD": "01-15",
-  "createdAt": "2024-01-15T00:00:00.000Z",
-  "updatedAt": "2024-01-15T00:00:00.000Z"
-}
-```
-
-#### Update User
+3. Start the serverless offline server:
 ```bash
-PUT /users/{userId}
-Content-Type: application/json
-
-{
-  "firstName": "John",
-  "lastName": "Smith",
-  "birthday": "1990-02-15",
-  "location": "Europe/London"
-}
+npm run start:local
 ```
 
-#### Delete User
+## Environment Variables
+
+Create a `.env` file in the root directory with the following variables:
+
+```env
+# Local Development
+STAGE=local
+IS_OFFLINE=true
+DYNAMODB_ENDPOINT=http://localhost:4566
+SCHEDULER_ENDPOINT=http://localhost:4566
+EVENTBRIDGE_ENDPOINT=http://localhost:4566
+WEBHOOK_ENDPOINT=your_webhook_endpoint_url
+
+# Optional: Override table names
+USERS_TABLE=birthday-service-users-local
+MESSAGE_LOGS_TABLE=birthday-service-logs-local
+```
+
+## Testing the Application
+
+1. Create a user with today's date as birthday:
 ```bash
-DELETE /users/{userId}
+curl -X POST http://localhost:3000/local/users \
+  -H "Content-Type: application/json" \
+  -d '{
+    "firstName": "John",
+    "lastName": "Doe",
+    "birthday": "'$(date +%Y-%m-%d)'",
+    "location": "America/New_York"
+  }'
 ```
 
-### System Flow
+2. The system will automatically:
+   - Create the user in DynamoDB
+   - Create a schedule (every minute in local dev, 9 AM user's local time in prod)
+   - Send a birthday message via webhook
+   - Track message delivery status
 
-1. Daily Aggregator (runs at 00:00 UTC):
-   - Queries DynamoDB for users with birthdays today
-   - Creates message logs for tracking
-   - Schedules messages using EventBridge Scheduler
-
-2. Birthday Message Sender:
-   - Triggered by EventBridge at scheduled time (9am user's local time)
-   - Sends greeting to RequestBin endpoint
-   - Updates message status in DynamoDB
-
-### Data Models
-
-#### User
-```typescript
-{
-  userId: string;          // UUID
-  firstName: string;
-  lastName: string;
-  birthday: string;        // YYYY-MM-DD
-  location: string;        // IANA timezone (e.g., 'America/New_York')
-  birthdayMD: string;     // MM-DD for querying
-}
+3. You can manually trigger the daily birthday check:
+```bash
+curl -X POST http://localhost:3000/local/birthday/daily
 ```
 
-#### Message Log
-```typescript
-{
-  messageId: string;       // userId_YYYY-MM-DD
-  status: 'PENDING' | 'SENT' | 'FAILED';
-  attempts: number;
-  lastAttempt?: string;   // ISO datetime
-  error?: string;
-  ttl: number;            // Unix timestamp for auto-deletion
-}
+## Development Commands
+
+- `npm run dev` - Start complete local development environment
+- `npm test` - Run tests
+- `npm run test:watch` - Run tests in watch mode
+- `npm run test:coverage` - Run tests with coverage report
+- `npm run lint` - Run TypeScript type checking
+- `npm run clean` - Clean build artifacts
+- `npm run reinstall` - Clean and reinstall dependencies
+
+## Architecture
+
+The service consists of three main Lambda functions:
+1. `userApi` - Handles user CRUD operations
+2. `dailyAggregator` - Runs daily to check for birthdays
+3. `birthdayMessageSender` - Sends birthday messages via webhook
+
+Data is stored in two DynamoDB tables:
+1. `users` - Stores user information with GSI on birthdayMD and location
+2. `message-logs` - Tracks message delivery status with TTL
+
+## Troubleshooting
+
+1. If LocalStack services aren't responding:
+```bash
+npm run start:localstack
 ```
 
-### Data Validation
+2. If you need to reset the local environment:
+```bash
+npm run clean
+npm install
+npm run dev
+```
 
-The service includes robust validation:
-1. Location validation:
-   - Must be a valid IANA timezone identifier
-   - Examples: 'America/New_York', 'Asia/Tokyo', 'Europe/London'
-   - Full list: [IANA Time Zone Database](https://www.iana.org/time-zones)
-
-2. Date validation:
-   - Birthday must be in YYYY-MM-DD format
-   - Date must be valid (e.g., "2024-02-30" is invalid)
-
-3. Message tracking:
-   - Automatic retry on failure
-   - Error logging with details
-   - 30-day retention using DynamoDB TTL
+3. To verify LocalStack services:
+```bash
+aws --endpoint-url=http://localhost:4566 dynamodb list-tables
+aws --endpoint-url=http://localhost:4566 scheduler list-schedules
+```
 
 ## Production Deployment
 
-1. Set up AWS credentials
-2. Update environment variables in serverless.yml
-3. Deploy:
+For production deployment:
+
+1. Configure AWS credentials
+2. Update environment variables for production
+3. Deploy using:
 ```bash
 npm run deploy -- --stage prod
 ```
 
-## Testing
+## License
 
-Run the test suite:
-```bash
-npm test
-```
-
-## Error Handling
-
-The service includes comprehensive error handling:
-1. Invalid timezone/location errors
-2. Message delivery failures
-3. Database operation errors
-4. Scheduler errors
-
-All errors are logged with appropriate context for debugging. 
+MIT 

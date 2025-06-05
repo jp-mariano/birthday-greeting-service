@@ -5,21 +5,37 @@ import { CreateUserRequestSchema } from '../types/models';
 import { DateTime } from 'luxon';
 import { ZodError } from 'zod';
 
-// Create default instances for direct Lambda invocation
-const defaultDb = new DynamoDBService();
-const defaultScheduler = new SchedulerService();
-
 export const handler = async (
   event: APIGatewayProxyEvent,
-  _context: Context,
-  dbService: DynamoDBService = defaultDb,
-  schedulerService: SchedulerService = defaultScheduler
+  _context: Context
 ): Promise<APIGatewayProxyResult> => {
+  // Create service instances inside the handler
+  const dbService = new DynamoDBService();
+  const schedulerService = new SchedulerService();
+
   try {
     switch (event.httpMethod) {
       case 'POST': {
         const userData = CreateUserRequestSchema.parse(JSON.parse(event.body!));
         const user = await dbService.createUser(userData);
+
+        // Check if the user's birthday is today, if so create a schedule
+        const today = DateTime.utc().toFormat('yyyy-MM-dd');
+        const userBirthdayMD = DateTime.fromISO(userData.birthday).toFormat('MM-dd');
+        const todayMD = DateTime.fromISO(today).toFormat('MM-dd');
+
+        if (userBirthdayMD === todayMD) {
+          console.log('User birthday is today, creating schedule...');
+          const message = {
+            userId: user.userId,
+            firstName: user.firstName,
+            lastName: user.lastName,
+            location: user.location
+          };
+          await schedulerService.scheduleMessage(message, today);
+          console.log('Schedule created successfully');
+        }
+
         return {
           statusCode: 201,
           body: JSON.stringify(user)

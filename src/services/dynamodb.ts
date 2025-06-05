@@ -1,7 +1,8 @@
 import { DynamoDBDocumentClient, PutCommand, QueryCommand, DeleteCommand, UpdateCommand, GetCommand } from '@aws-sdk/lib-dynamodb';
 import { DateTime } from 'luxon';
-import { randomUUID } from 'crypto';
+import crypto from 'crypto';
 import { User, MessageLog } from '../types/models';
+import { DynamoDBClient, DynamoDBClientConfig } from '@aws-sdk/client-dynamodb';
 
 export class DynamoDBService {
   private client: DynamoDBDocumentClient;
@@ -9,7 +10,33 @@ export class DynamoDBService {
   private logsTable: string;
 
   constructor(client?: DynamoDBDocumentClient) {
-    this.client = client || DynamoDBDocumentClient.from({} as any);
+    if (client) {
+      this.client = client;
+    } else {
+      const dynamoConfig: DynamoDBClientConfig = {
+        region: process.env.AWS_REGION || 'us-east-1'
+      };
+
+      // Use LocalStack endpoint if available
+      if (process.env.DYNAMODB_ENDPOINT) {
+        dynamoConfig.endpoint = process.env.DYNAMODB_ENDPOINT;
+        // For LocalStack, we don't need real credentials
+        dynamoConfig.credentials = {
+          accessKeyId: 'test',
+          secretAccessKey: 'test'
+        };
+      }
+
+      const marshallOptions = {
+        convertEmptyValues: true,
+        removeUndefinedValues: true,
+        convertClassInstanceToMap: true
+      };
+
+      const translateConfig = { marshallOptions };
+      const dynamoClient = new DynamoDBClient(dynamoConfig);
+      this.client = DynamoDBDocumentClient.from(dynamoClient, translateConfig);
+    }
     this.usersTable = process.env.USERS_TABLE || 'test-users-table';
     this.logsTable = process.env.MESSAGE_LOGS_TABLE || 'test-logs-table';
   }
@@ -45,7 +72,7 @@ export class DynamoDBService {
     this.validateBirthday(userData.birthday);
 
     const now = DateTime.utc().toISO();
-    const userId = randomUUID();
+    const userId = crypto.randomUUID();
     const birthdayMD = DateTime.fromISO(userData.birthday).toFormat('MM-dd');
 
     const user: User = {
@@ -161,18 +188,27 @@ export class DynamoDBService {
   }
 
   async getTodaysBirthdays(): Promise<User[]> {
-    const today = DateTime.utc().toFormat('MM-dd');
+    console.log('Getting today\'s birthdays...');
+    const today = DateTime.utc();
+    const birthdayMD = today.toFormat('MM-dd');
+    console.log('Looking for birthdays on:', birthdayMD);
 
-    const result = await this.client.send(new QueryCommand({
-      TableName: this.usersTable,
-      IndexName: 'birthdayIndex',
-      KeyConditionExpression: 'birthdayMD = :today',
-      ExpressionAttributeValues: {
-        ':today': today
-      }
-    }));
+    try {
+      const result = await this.client.send(new QueryCommand({
+        TableName: this.usersTable,
+        IndexName: 'birthdayIndex',
+        KeyConditionExpression: 'birthdayMD = :birthdayMD',
+        ExpressionAttributeValues: {
+          ':birthdayMD': birthdayMD
+        }
+      }));
 
-    return result?.Items as User[] || [];
+      console.log('Query result:', JSON.stringify(result, null, 2));
+      return (result.Items || []) as User[];
+    } catch (error) {
+      console.error('Error querying birthdays:', error);
+      throw error;
+    }
   }
 
   async getMessageLog(messageId: string): Promise<MessageLog | null> {

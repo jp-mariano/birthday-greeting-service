@@ -2,7 +2,6 @@ service: birthday-service
 
 plugins:
   - serverless-esbuild
-  - serverless-localstack
   - serverless-offline
 
 provider:
@@ -11,10 +10,26 @@ provider:
   stage: ${opt:stage, 'dev'}
   region: ${opt:region, 'us-east-1'}
   
+  # LocalStack specific configuration
+  apiGateway:
+    shouldStartLocal: true
+  custom:
+    localstack:
+      stages:
+        - local
+      host: http://localhost
+      edgePort: 4566
+  
   environment:
     USERS_TABLE: ${self:service}-users-${self:provider.stage}
     MESSAGE_LOGS_TABLE: ${self:service}-logs-${self:provider.stage}
-    WEBHOOK_ENDPOINT: ${param:webhookEndpoint, 'https://example.pipedream.net'}
+    WEBHOOK_ENDPOINT: ${env:WEBHOOK_ENDPOINT, 'https://eog8uvm3yyo7caf.m.pipedream.net'}
+    DYNAMODB_ENDPOINT: ${env:DYNAMODB_ENDPOINT, 'http://localhost:4566'}
+    SCHEDULER_ENDPOINT: ${env:SCHEDULER_ENDPOINT, 'http://localhost:4566'}
+    EVENTBRIDGE_ENDPOINT: ${env:EVENTBRIDGE_ENDPOINT, 'http://localhost:4566'}
+    SCHEDULER_ROLE_ARN: ${env:SCHEDULER_ROLE_ARN, 'arn:aws:iam::000000000000:role/scheduler-role'}
+    SENDER_FUNCTION_ARN: !GetAtt BirthdayMessageSenderLambdaFunction.Arn
+    IS_OFFLINE: ${env:IS_OFFLINE, 'false'}
 
   iam:
     role:
@@ -35,6 +50,10 @@ provider:
           Action:
             - scheduler:CreateSchedule
             - scheduler:DeleteSchedule
+            - events:PutRule
+            - events:DeleteRule
+            - events:PutTargets
+            - events:RemoveTargets
           Resource: '*'
 
 functions:
@@ -57,6 +76,9 @@ functions:
       - schedule:
           rate: cron(0 0 * * ? *)
           enabled: true
+      - http:
+          path: /birthday/daily
+          method: post
 
   birthdayMessageSender:
     handler: src/handlers/sender.handler
@@ -114,14 +136,20 @@ resources:
 custom:
   esbuild:
     bundle: true
-    minify: true
+    minify: false
     sourcemap: true
     exclude: ['aws-sdk']
     target: 'node20'
     platform: 'node'
-    
-  localstack:
-    stages:
-      - local
-    host: http://localhost
-    edgePort: 4566 
+    mainFields: ['module', 'main']
+    conditions: ['node']
+    packages: 'external'
+    keepNames: true
+    define:
+      'process.env.NODE_ENV': "'production'"
+  
+  # Configure serverless-offline
+  serverless-offline:
+    httpPort: 3000
+    lambdaPort: 3002
+    useChildProcesses: true

@@ -8,12 +8,21 @@
   },
   "scripts": {
     "test": "jest",
+    "test:watch": "jest --watch",
+    "test:coverage": "jest --coverage",
     "build": "tsc",
-    "start": "serverless offline start"
+    "start": "serverless offline start",
+    "start:local": "serverless offline start --stage local",
+    "deploy:local": "serverless deploy --stage local",
+    "start:localstack": "./scripts/start-localstack.sh",
+    "setup:local": "node scripts/setup-local.js",
+    "dev": "concurrently \"npm run start:localstack\" \"sleep 5 && npm run setup:local && npm run start:local\"",
+    "lint": "tsc --noEmit",
+    "clean": "rm -rf .serverless .build .esbuild node_modules",
+    "reinstall": "npm run clean && npm install"
   },
   "dependencies": {
     "@aws-sdk/client-dynamodb": "^3.0.0",
-    "@aws-sdk/client-eventbridge": "^3.0.0",
     "@aws-sdk/client-scheduler": "^3.0.0",
     "@aws-sdk/lib-dynamodb": "^3.0.0",
     "@aws-sdk/util-dynamodb": "^3.0.0",
@@ -25,14 +34,14 @@
     "@types/jest": "^29.0.0",
     "@types/luxon": "^3.0.0",
     "@types/node": "^20.0.0",
+    "concurrently": "^8.2.0",
     "esbuild": "^0.19.0",
     "jest": "^29.0.0",
     "serverless": "^3.0.0",
     "serverless-esbuild": "^1.0.0",
-    "serverless-localstack": "^1.0.0",
     "serverless-offline": "^13.0.0",
     "ts-jest": "^29.0.0",
     "ts-node": "^10.9.2",
     "typescript": "^5.0.0"
   }
-} 
+}
