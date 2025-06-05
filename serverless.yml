@@ -1,0 +1,127 @@
+service: birthday-service
+
+plugins:
+  - serverless-esbuild
+  - serverless-localstack
+  - serverless-offline
+
+provider:
+  name: aws
+  runtime: nodejs20.x
+  stage: ${opt:stage, 'dev'}
+  region: ${opt:region, 'us-east-1'}
+  
+  environment:
+    USERS_TABLE: ${self:service}-users-${self:provider.stage}
+    MESSAGE_LOGS_TABLE: ${self:service}-logs-${self:provider.stage}
+    WEBHOOK_ENDPOINT: ${param:webhookEndpoint, 'https://example.pipedream.net'}
+
+  iam:
+    role:
+      statements:
+        - Effect: Allow
+          Action:
+            - dynamodb:Query
+            - dynamodb:Scan
+            - dynamodb:GetItem
+            - dynamodb:PutItem
+            - dynamodb:UpdateItem
+            - dynamodb:DeleteItem
+          Resource: 
+            - !GetAtt UsersTable.Arn
+            - !GetAtt MessageLogsTable.Arn
+            - !Join ['/', [!GetAtt UsersTable.Arn, 'index/*']]
+        - Effect: Allow
+          Action:
+            - scheduler:CreateSchedule
+            - scheduler:DeleteSchedule
+          Resource: '*'
+
+functions:
+  userApi:
+    handler: src/handlers/users.handler
+    events:
+      - http:
+          path: /users
+          method: post
+      - http:
+          path: /users/{userId}
+          method: put
+      - http:
+          path: /users/{userId}
+          method: delete
+
+  dailyAggregator:
+    handler: src/handlers/daily.handler
+    events:
+      - schedule:
+          rate: cron(0 0 * * ? *)
+          enabled: true
+
+  birthdayMessageSender:
+    handler: src/handlers/sender.handler
+    events:
+      - http:
+          path: /birthday/send
+          method: post
+    
+resources:
+  Resources:
+    UsersTable:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        TableName: ${self:provider.environment.USERS_TABLE}
+        BillingMode: PAY_PER_REQUEST
+        AttributeDefinitions:
+          - AttributeName: userId
+            AttributeType: S
+          - AttributeName: sk
+            AttributeType: S
+          - AttributeName: birthdayMD
+            AttributeType: S
+          - AttributeName: location
+            AttributeType: S
+        KeySchema:
+          - AttributeName: userId
+            KeyType: HASH
+          - AttributeName: sk
+            KeyType: RANGE
+        GlobalSecondaryIndexes:
+          - IndexName: birthdayIndex
+            KeySchema:
+              - AttributeName: birthdayMD
+                KeyType: HASH
+              - AttributeName: location
+                KeyType: RANGE
+            Projection:
+              ProjectionType: ALL
+
+    MessageLogsTable:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        TableName: ${self:provider.environment.MESSAGE_LOGS_TABLE}
+        BillingMode: PAY_PER_REQUEST
+        AttributeDefinitions:
+          - AttributeName: messageId
+            AttributeType: S
+        KeySchema:
+          - AttributeName: messageId
+            KeyType: HASH
+        TimeToLiveSpecification:
+          AttributeName: ttl
+          Enabled: true
+
+custom:
+  esbuild:
+    bundle: true
+    minify: true
+    sourcemap: true
+    exclude: ['aws-sdk']
+    target: 'node20'
+    platform: 'node'
+    
+  localstack:
+    stages:
+      - local
+    host: http://localhost
+    edgePort: 4566 
