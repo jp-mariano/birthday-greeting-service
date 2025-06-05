@@ -4,6 +4,8 @@ import { BirthdayMessage, BirthdayMessageSchema } from '../types/models';
 import { DateTime } from 'luxon';
 import { ZodError } from 'zod';
 
+const MAX_ATTEMPTS = 3;
+
 async function sendToHookbin(message: BirthdayMessage): Promise<void> {
   // Prepare the webhook payload with the birthday message
   const webhookPayload = {
@@ -29,6 +31,10 @@ async function sendToHookbin(message: BirthdayMessage): Promise<void> {
     console.log('Webhook response status:', response.status);
     const responseText = await response.text();
     console.log('Webhook response body:', responseText);
+
+    if (!response.ok) {
+      throw new Error(`Webhook failed with status ${response.status}: ${responseText}`);
+    }
 
     // Consider any response as success for Pipedream
     // Pipedream always returns a 200 OK with "Success!" message
@@ -61,6 +67,18 @@ export const handler = async (
       };
     }
 
+    // Check if we've exceeded max attempts
+    if (existingLog?.attempts && existingLog.attempts >= MAX_ATTEMPTS) {
+      console.log(`Message ${messageId} has exceeded maximum retry attempts (${MAX_ATTEMPTS})`);
+      return {
+        statusCode: 500,
+        body: JSON.stringify({ 
+          error: 'Max retry attempts exceeded',
+          details: `Failed to send message after ${MAX_ATTEMPTS} attempts`
+        })
+      };
+    }
+
     // Create message log if it doesn't exist
     if (!existingLog) {
       console.log('Creating new message log for:', messageId);
@@ -85,10 +103,25 @@ export const handler = async (
         body: JSON.stringify({ message: 'Birthday message sent successfully' })
       };
     } catch (error) {
-      // If webhook fails, update status to FAILED
+      // If webhook fails, update status to FAILED and include attempt count
       console.error('Failed to send webhook, updating status to FAILED:', messageId);
-      await dbService.updateMessageStatus(messageId, 'FAILED');
-      throw error;
+      const updatedLog = await dbService.updateMessageStatus(messageId, 'FAILED');
+      
+      // If we haven't exceeded max attempts, throw error to trigger retry
+      if (updatedLog.attempts < MAX_ATTEMPTS) {
+        console.log(`Attempt ${updatedLog.attempts} of ${MAX_ATTEMPTS} failed, will retry...`);
+        throw error;
+      }
+
+      console.log(`All ${MAX_ATTEMPTS} attempts failed for message ${messageId}`);
+      return {
+        statusCode: 500,
+        body: JSON.stringify({ 
+          error: 'Failed to send message',
+          details: error instanceof Error ? error.message : 'Unknown error',
+          attempts: updatedLog.attempts
+        })
+      };
     }
   } catch (error) {
     console.error('Error processing birthday message:', error);
