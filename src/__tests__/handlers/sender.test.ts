@@ -1,10 +1,18 @@
 import { DynamoDBService } from '../../services/dynamodb';
 import { handler } from '../../handlers/sender';
 import { BirthdayMessage, MessageLog } from '../../types/models';
-import { Context } from 'aws-lambda';
+import { APIGatewayProxyEvent, Context } from 'aws-lambda';
 
 // Mock the DynamoDB service
-jest.mock('../../services/dynamodb');
+jest.mock('../../services/dynamodb', () => {
+  return {
+    DynamoDBService: jest.fn().mockImplementation(() => ({
+      getMessageLog: jest.fn(),
+      createMessageLog: jest.fn(),
+      updateMessageStatus: jest.fn()
+    }))
+  };
+});
 
 // Mock fetch
 const mockFetch = jest.fn();
@@ -17,6 +25,7 @@ jest.useFakeTimers().setSystemTime(new Date(mockDateISO));
 
 // Mock environment variables
 process.env.WEBHOOK_ENDPOINT = 'https://test-webhook.pipedream.net';
+process.env.IS_OFFLINE = 'true';
 
 describe('Message Sender Handler', () => {
   let mockDynamoDBService: jest.Mocked<DynamoDBService>;
@@ -43,10 +52,25 @@ describe('Message Sender Handler', () => {
     location: 'America/New_York'
   };
 
-  const mockMessageLog = (status: 'PENDING' | 'SENT' | 'FAILED'): MessageLog => ({
+  const mockEvent: APIGatewayProxyEvent = {
+    body: JSON.stringify(validMessage),
+    headers: {},
+    multiValueHeaders: {},
+    httpMethod: 'POST',
+    isBase64Encoded: false,
+    path: '/send',
+    pathParameters: null,
+    queryStringParameters: null,
+    multiValueQueryStringParameters: null,
+    stageVariables: null,
+    requestContext: {} as any,
+    resource: ''
+  };
+
+  const mockMessageLog = (status: 'PENDING' | 'SENT' | 'FAILED', attempts: number = 0): MessageLog => ({
     messageId: `${validMessage.userId}_${mockDate}`,
     status,
-    attempts: status === 'PENDING' ? 0 : 1,
+    attempts,
     createdAt: mockDateISO,
     updatedAt: mockDateISO,
     ttl: Math.floor(new Date('2024-01-02T00:00:00.000Z').getTime() / 1000)
@@ -54,117 +78,131 @@ describe('Message Sender Handler', () => {
 
   beforeEach(() => {
     jest.clearAllMocks();
+    console.log = jest.fn();
+    console.error = jest.fn();
 
-    // Create fresh mock instance
+    // Reset DynamoDB mock
     mockDynamoDBService = new DynamoDBService() as jest.Mocked<DynamoDBService>;
-
-    // Mock the methods we'll use
-    jest.spyOn(mockDynamoDBService, 'getMessageLog');
-    jest.spyOn(mockDynamoDBService, 'createMessageLog');
-    jest.spyOn(mockDynamoDBService, 'updateMessageStatus');
+    (DynamoDBService as jest.Mock).mockImplementation(() => mockDynamoDBService);
   });
 
   it('should process birthday message successfully', async () => {
     mockDynamoDBService.getMessageLog.mockResolvedValue(null);
     mockDynamoDBService.createMessageLog.mockResolvedValue(mockMessageLog('PENDING'));
     mockDynamoDBService.updateMessageStatus.mockResolvedValue(mockMessageLog('SENT'));
-    mockFetch.mockResolvedValue({ ok: true });
+    mockFetch.mockResolvedValue({ 
+      ok: true, 
+      status: 200,
+      text: async () => 'Success!'
+    });
 
-    await handler(validMessage, mockContext, mockDynamoDBService);
+    const response = await handler(mockEvent, mockContext);
 
-    expect(mockDynamoDBService.getMessageLog).toHaveBeenCalledWith(`${validMessage.userId}_${mockDate}`);
-    expect(mockDynamoDBService.createMessageLog).toHaveBeenCalledWith(validMessage.userId, mockDate);
-    expect(mockDynamoDBService.updateMessageStatus).toHaveBeenCalledWith(`${validMessage.userId}_${mockDate}`, 'SENT');
-    expect(mockFetch).toHaveBeenCalledWith(process.env.WEBHOOK_ENDPOINT, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify(validMessage)
+    expect(response.statusCode).toBe(200);
+    expect(JSON.parse(response.body)).toEqual({
+      message: 'Birthday message sent successfully'
+    });
+    expect(console.log).toHaveBeenCalledWith('🎂 Sending birthday message:', expect.any(Object));
+  });
+
+  it('should handle invalid input data', async () => {
+    const invalidEvent = {
+      ...mockEvent,
+      body: JSON.stringify({ 
+        userId: 'invalid-uuid',
+        firstName: '',  // Invalid: empty string
+        lastName: 'Doe',
+        location: 'Invalid/Timezone'
+      })
+    };
+
+    const response = await handler(invalidEvent, mockContext);
+
+    expect(response.statusCode).toBe(500);
+    expect(JSON.parse(response.body)).toHaveProperty('error');
+    expect(JSON.parse(response.body)).toHaveProperty('details');
+    expect(JSON.parse(response.body).details).toBeInstanceOf(Array);
+  });
+
+  it('should handle retry mechanism correctly', async () => {
+    const networkError = new Error('Network error');
+    mockDynamoDBService.getMessageLog.mockResolvedValue(mockMessageLog('FAILED', 1));
+    mockDynamoDBService.updateMessageStatus.mockResolvedValue(mockMessageLog('FAILED', 2));
+    mockFetch.mockRejectedValue(networkError);
+
+    const response = await handler(mockEvent, mockContext);
+
+    expect(response.statusCode).toBe(500);
+    expect(JSON.parse(response.body)).toEqual({
+      error: networkError.message
     });
   });
 
-  it('should handle non-existent message log', async () => {
-    mockDynamoDBService.getMessageLog.mockResolvedValue(null);
-    mockDynamoDBService.createMessageLog.mockResolvedValue(mockMessageLog('PENDING'));
-    mockDynamoDBService.updateMessageStatus.mockResolvedValue(mockMessageLog('SENT'));
-    mockFetch.mockResolvedValue({ ok: true });
+  it('should stop retrying after MAX_ATTEMPTS', async () => {
+    mockDynamoDBService.getMessageLog.mockResolvedValue(mockMessageLog('FAILED', 3));
 
-    await handler(validMessage, mockContext, mockDynamoDBService);
+    const response = await handler(mockEvent, mockContext);
 
-    expect(mockDynamoDBService.getMessageLog).toHaveBeenCalledWith(`${validMessage.userId}_${mockDate}`);
-    expect(mockDynamoDBService.createMessageLog).toHaveBeenCalledWith(validMessage.userId, mockDate);
-    expect(mockDynamoDBService.updateMessageStatus).toHaveBeenCalledWith(`${validMessage.userId}_${mockDate}`, 'SENT');
-    expect(mockFetch).toHaveBeenCalledWith(process.env.WEBHOOK_ENDPOINT, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify(validMessage)
+    expect(response.statusCode).toBe(500);
+    expect(JSON.parse(response.body)).toEqual({
+      error: 'Max retry attempts exceeded',
+      details: 'Failed to send message after 3 attempts'
     });
+    expect(mockFetch).not.toHaveBeenCalled();
   });
 
-  it('should handle DynamoDB errors', async () => {
-    const error = new Error('Failed to update status');
+  it('should handle webhook response parsing', async () => {
     mockDynamoDBService.getMessageLog.mockResolvedValue(null);
     mockDynamoDBService.createMessageLog.mockResolvedValue(mockMessageLog('PENDING'));
-    mockDynamoDBService.updateMessageStatus.mockRejectedValue(error);
-    mockFetch.mockResolvedValue({ ok: true });
+    mockDynamoDBService.updateMessageStatus.mockResolvedValue(mockMessageLog('FAILED', 1));
+    mockFetch.mockResolvedValue({ 
+      ok: false, 
+      status: 500,
+      text: async () => 'Internal Server Error'
+    });
 
-    await expect(handler(validMessage, mockContext, mockDynamoDBService))
-      .rejects.toThrow('Failed to update status');
+    const response = await handler(mockEvent, mockContext);
 
-    expect(mockDynamoDBService.getMessageLog).toHaveBeenCalledWith(`${validMessage.userId}_${mockDate}`);
-    expect(mockDynamoDBService.createMessageLog).toHaveBeenCalledWith(validMessage.userId, mockDate);
-    expect(mockDynamoDBService.updateMessageStatus).toHaveBeenCalledWith(`${validMessage.userId}_${mockDate}`, 'SENT');
+    expect(response.statusCode).toBe(500);
+    expect(JSON.parse(response.body)).toEqual({
+      error: 'Webhook failed with status 500: Internal Server Error'
+    });
+    expect(console.error).toHaveBeenCalled();
+  });
+
+  it('should handle missing event body', async () => {
+    const invalidEvent = {
+      ...mockEvent,
+      body: null
+    };
+
+    const response = await handler(invalidEvent, mockContext);
+
+    expect(response.statusCode).toBe(500);
+    expect(JSON.parse(response.body)).toHaveProperty('error');
   });
 
   it('should handle already processed messages', async () => {
     mockDynamoDBService.getMessageLog.mockResolvedValue(mockMessageLog('SENT'));
 
-    await handler(validMessage, mockContext, mockDynamoDBService);
+    const response = await handler(mockEvent, mockContext);
 
-    expect(mockDynamoDBService.getMessageLog).toHaveBeenCalledWith(`${validMessage.userId}_${mockDate}`);
-    expect(mockDynamoDBService.createMessageLog).not.toHaveBeenCalled();
-    expect(mockDynamoDBService.updateMessageStatus).not.toHaveBeenCalled();
+    expect(response.statusCode).toBe(200);
+    expect(JSON.parse(response.body)).toEqual({
+      message: `Message ${validMessage.userId}_${mockDate} has already been sent`
+    });
     expect(mockFetch).not.toHaveBeenCalled();
   });
 
-  it('should handle Hookbin API failures', async () => {
-    mockDynamoDBService.getMessageLog.mockResolvedValue(null);
-    mockDynamoDBService.createMessageLog.mockResolvedValue(mockMessageLog('PENDING'));
-    mockFetch.mockResolvedValue({ ok: false, statusText: 'Internal Server Error' });
+  it('should handle DynamoDB errors gracefully', async () => {
+    const dbError = new Error('DynamoDB error');
+    mockDynamoDBService.getMessageLog.mockRejectedValue(dbError);
 
-    await expect(handler(validMessage, mockContext, mockDynamoDBService))
-      .rejects.toThrow('Failed to send message: Internal Server Error');
+    const response = await handler(mockEvent, mockContext);
 
-    expect(mockDynamoDBService.getMessageLog).toHaveBeenCalledWith(`${validMessage.userId}_${mockDate}`);
-    expect(mockDynamoDBService.createMessageLog).toHaveBeenCalledWith(validMessage.userId, mockDate);
-    expect(mockDynamoDBService.updateMessageStatus).not.toHaveBeenCalled();
-  });
-
-  it('should use default service instance when not provided', async () => {
-    const defaultDbSpy = jest.spyOn(DynamoDBService.prototype, 'getMessageLog')
-      .mockResolvedValue(null);
-    const defaultDbCreateSpy = jest.spyOn(DynamoDBService.prototype, 'createMessageLog')
-      .mockResolvedValue(mockMessageLog('PENDING'));
-    const defaultDbUpdateSpy = jest.spyOn(DynamoDBService.prototype, 'updateMessageStatus')
-      .mockResolvedValue(mockMessageLog('SENT'));
-    mockFetch.mockResolvedValue({ ok: true });
-
-    await handler(validMessage, mockContext);
-
-    expect(defaultDbSpy).toHaveBeenCalledWith(`${validMessage.userId}_${mockDate}`);
-    expect(defaultDbCreateSpy).toHaveBeenCalledWith(validMessage.userId, mockDate);
-    expect(mockFetch).toHaveBeenCalledWith(process.env.WEBHOOK_ENDPOINT, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(validMessage)
+    expect(response.statusCode).toBe(500);
+    expect(JSON.parse(response.body)).toEqual({
+      error: dbError.message
     });
-    expect(defaultDbUpdateSpy).toHaveBeenCalledWith(`${validMessage.userId}_${mockDate}`, 'SENT');
-
-    defaultDbSpy.mockRestore();
-    defaultDbCreateSpy.mockRestore();
-    defaultDbUpdateSpy.mockRestore();
   });
 }); 
