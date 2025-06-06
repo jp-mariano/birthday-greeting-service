@@ -74,7 +74,7 @@ functions:
     handler: src/handlers/daily.handler
     events:
       - schedule:
-          rate: cron(0 0 * * ? *)
+          rate: cron(0 10 * * ? *)
           enabled: true
       - http:
           path: /birthday/daily
