@@ -61,7 +61,7 @@ functions:
     handler: src/handlers/birthday.handler
     timeout: 30 # Function-specific timeout
     events:
-      - schedule: rate(15 minutes)
+      - schedule: cron(0,15,30,45 * * * ? *)  # Run at minute 0, 15, 30, and 45 of every hour
       # Keep HTTP endpoint for manual triggers
       - http:
           path: /birthday/check
