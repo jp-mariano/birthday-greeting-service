@@ -62,15 +62,10 @@ custom:
     bundle: true
     minify: false
     sourcemap: true
-    exclude: ['aws-sdk']
-    target: 'node20'
     platform: 'node'
-    mainFields: ['module', 'main']
-    conditions: ['node']
-    packages: 'external'
-    keepNames: true
-    define:
-      'process.env.NODE_ENV': "'production'"
+    target: 'node20'
+    external:
+      - aws-sdk
   
   # Configure serverless-offline
   serverless-offline:
@@ -105,7 +100,7 @@ resources:
         EnableDnsSupport: true
         Tags:
           - Key: Name
-            Value: ${self:service}-${self:provider.stage}
+            Value: ${self:service}-${self:provider.stage}-vpc
 
     # Public Subnets (for Lambda)
     PublicSubnet1:
@@ -115,6 +110,9 @@ resources:
         AvailabilityZone: ${self:provider.region}a
         CidrBlock: 10.0.1.0/24
         MapPublicIpOnLaunch: true
+        Tags:
+          - Key: Name
+            Value: ${self:service}-${self:provider.stage}-public-subnet-1
 
     PublicSubnet2:
       Type: AWS::EC2::Subnet
@@ -123,6 +121,9 @@ resources:
         AvailabilityZone: ${self:provider.region}b
         CidrBlock: 10.0.2.0/24
         MapPublicIpOnLaunch: true
+        Tags:
+          - Key: Name
+            Value: ${self:service}-${self:provider.stage}-public-subnet-2
 
     # Private Subnet (for RDS)
     PrivateSubnet1:
@@ -131,6 +132,19 @@ resources:
         VpcId: !Ref MainVPC
         AvailabilityZone: ${self:provider.region}a
         CidrBlock: 10.0.3.0/24
+        Tags:
+          - Key: Name
+            Value: ${self:service}-${self:provider.stage}-private-subnet-1
+
+    PrivateSubnet2:
+      Type: AWS::EC2::Subnet
+      Properties:
+        VpcId: !Ref MainVPC
+        AvailabilityZone: ${self:provider.region}b
+        CidrBlock: 10.0.4.0/24
+        Tags:
+          - Key: Name
+            Value: ${self:service}-${self:provider.stage}-private-subnet-2
 
     # Internet Gateway
     InternetGateway:
@@ -147,6 +161,9 @@ resources:
       Type: AWS::EC2::RouteTable
       Properties:
         VpcId: !Ref MainVPC
+        Tags:
+          - Key: Name
+            Value: ${self:service}-${self:provider.stage}-public-rt
 
     PublicRoute:
       Type: AWS::EC2::Route
@@ -155,6 +172,18 @@ resources:
         RouteTableId: !Ref PublicRouteTable
         DestinationCidrBlock: 0.0.0.0/0
         GatewayId: !Ref InternetGateway
+
+    PublicSubnet1RouteTableAssociation:
+      Type: AWS::EC2::SubnetRouteTableAssociation
+      Properties:
+        SubnetId: !Ref PublicSubnet1
+        RouteTableId: !Ref PublicRouteTable
+
+    PublicSubnet2RouteTableAssociation:
+      Type: AWS::EC2::SubnetRouteTableAssociation
+      Properties:
+        SubnetId: !Ref PublicSubnet2
+        RouteTableId: !Ref PublicRouteTable
 
     # Security Groups
     LambdaSecurityGroup:
@@ -168,7 +197,7 @@ resources:
             ToPort: -1
             CidrIp: 0.0.0.0/0
 
-    RDSSecurityGroup:
+    DBSecurityGroup:
       Type: AWS::EC2::SecurityGroup
       Properties:
         GroupDescription: Security group for RDS instance
@@ -178,25 +207,37 @@ resources:
             FromPort: 5432
             ToPort: 5432
             SourceSecurityGroupId: !Ref LambdaSecurityGroup
+        SecurityGroupEgress:
+          - IpProtocol: -1
+            FromPort: -1
+            ToPort: -1
+            CidrIp: 0.0.0.0/0
 
     # RDS Instance
-    BirthdayDB:
+    RDSInstance:
       Type: AWS::RDS::DBInstance
       Properties:
+        DBInstanceIdentifier: ${self:service}-${self:provider.stage}
         Engine: postgres
         DBInstanceClass: db.t3.micro
         AllocatedStorage: 20
-        DBName: ${self:custom.rds.database}
+        StorageType: gp2
         MasterUsername: ${self:custom.rds.username}
-        MasterUserPassword: ${self:custom.rds.password}
+        MasterUserPassword: ${ssm:/birthday-service/${self:provider.stage}/db/password}
         VPCSecurityGroups:
-          - !Ref RDSSecurityGroup
+          - !Ref DBSecurityGroup
         DBSubnetGroupName: !Ref DBSubnetGroup
         PubliclyAccessible: false
+        BackupRetentionPeriod: 7
+        MultiAZ: false
+        Tags:
+          - Key: Name
+            Value: ${self:service}-${self:provider.stage}-rds
 
     DBSubnetGroup:
       Type: AWS::RDS::DBSubnetGroup
       Properties:
-        DBSubnetGroupDescription: Subnet group for Birthday Service RDS
+        DBSubnetGroupDescription: Subnet group for RDS instance
         SubnetIds:
           - !Ref PrivateSubnet1
+          - !Ref PrivateSubnet2
