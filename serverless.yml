@@ -1,4 +1,4 @@
-service: birthday-service
+service: birthday-greeting
 
 plugins:
   - serverless-esbuild
@@ -9,14 +9,15 @@ provider:
   runtime: nodejs20.x
   stage: ${opt:stage, 'dev'}
   region: ap-southeast-1
+  timeout: 30 # Global timeout for all functions
+  vpc: ${self:custom.vpc} # Global VPC config for all functions
   
   environment:
-    DB_HOST: ${self:custom.rds.host}
+    DB_HOST: !GetAtt RDSInstance.Endpoint.Address
     DB_PORT: ${self:custom.rds.port}
     DB_NAME: ${self:custom.rds.database}
     DB_USER: ${self:custom.rds.username}
-    # Use AWS Parameter Store for password in non-local environments
-    DB_PASSWORD: ${self:custom.rds.password}
+    DB_PASSWORD: ${ssm:/birthday-greeting/${self:provider.stage}/db/password}
     WEBHOOK_ENDPOINT: ${env:WEBHOOK_ENDPOINT, 'https://eog8uvm3yyo7caf.m.pipedream.net'}
     IS_OFFLINE: ${env:IS_OFFLINE, 'false'}
 
@@ -28,11 +29,20 @@ provider:
             - ssm:GetParameter
             - ssm:GetParameters
           Resource: 
-            - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/birthday-service/${self:provider.stage}/*
+            - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/birthday-greeting/${self:provider.stage}/*
+        - Effect: Allow
+          Action:
+            - ec2:CreateNetworkInterface
+            - ec2:DescribeNetworkInterfaces
+            - ec2:DeleteNetworkInterface
+            - ec2:AssignPrivateIpAddresses
+            - ec2:UnassignPrivateIpAddresses
+          Resource: "*"
 
 functions:
   userApi:
     handler: src/handlers/users.handler
+    timeout: 30 # Function-specific timeout
     events:
       - http:
           path: /users
@@ -49,11 +59,21 @@ functions:
 
   birthdayChecker:
     handler: src/handlers/birthday.handler
+    timeout: 30 # Function-specific timeout
     events:
       - schedule: rate(15 minutes)
       # Keep HTTP endpoint for manual triggers
       - http:
           path: /birthday/check
+          method: post
+          cors: true
+
+  initDb:
+    handler: scripts/init-db.handler
+    timeout: 30
+    events:
+      - http:
+          path: /init-db
           method: post
           cors: true
 
@@ -75,21 +95,26 @@ custom:
 
   # RDS Configuration
   rds:
-    host: ${ssm:/birthday-service/${self:provider.stage}/db/host, 'localhost'}
-    port: ${ssm:/birthday-service/${self:provider.stage}/db/port, '5432'}
-    database: ${ssm:/birthday-service/${self:provider.stage}/db/name, 'birthday_db'}
-    username: ${ssm:/birthday-service/${self:provider.stage}/db/username, 'postgres'}
-    password: ${ssm:/birthday-service/${self:provider.stage}/db/password, 'postgres'}
+    host: ${ssm:/birthday-greeting/${self:provider.stage}/db/host, 'localhost'}
+    port: ${ssm:/birthday-greeting/${self:provider.stage}/db/port, '5432'}
+    database: ${ssm:/birthday-greeting/${self:provider.stage}/db/name, 'birthday-greeting-dev'}
+    username: ${ssm:/birthday-greeting/${self:provider.stage}/db/username, 'postgres'}
+    password: ${ssm:/birthday-greeting/${self:provider.stage}/db/password, 'postgres'}
 
   # VPC Configuration
   vpc:
     securityGroupIds:
       - !Ref LambdaSecurityGroup
     subnetIds:
-      - !Ref PublicSubnet1
-      - !Ref PublicSubnet2
+      - !Ref PrivateSubnet1
+      - !Ref PrivateSubnet2
 
 resources:
+  Outputs:
+    RDSEndpoint:
+      Description: "RDS instance endpoint"
+      Value: !GetAtt RDSInstance.Endpoint.Address
+
   Resources:
     # VPC Resources
     MainVPC:
@@ -102,7 +127,21 @@ resources:
           - Key: Name
             Value: ${self:service}-${self:provider.stage}-vpc
 
-    # Public Subnets (for Lambda)
+    # Internet Gateway
+    InternetGateway:
+      Type: AWS::EC2::InternetGateway
+      Properties:
+        Tags:
+          - Key: Name
+            Value: ${self:service}-${self:provider.stage}-igw
+
+    AttachGateway:
+      Type: AWS::EC2::VPCGatewayAttachment
+      Properties:
+        VpcId: !Ref MainVPC
+        InternetGatewayId: !Ref InternetGateway
+
+    # Public Subnet
     PublicSubnet1:
       Type: AWS::EC2::Subnet
       Properties:
@@ -114,18 +153,7 @@ resources:
           - Key: Name
             Value: ${self:service}-${self:provider.stage}-public-subnet-1
 
-    PublicSubnet2:
-      Type: AWS::EC2::Subnet
-      Properties:
-        VpcId: !Ref MainVPC
-        AvailabilityZone: ${self:provider.region}b
-        CidrBlock: 10.0.2.0/24
-        MapPublicIpOnLaunch: true
-        Tags:
-          - Key: Name
-            Value: ${self:service}-${self:provider.stage}-public-subnet-2
-
-    # Private Subnet (for RDS)
+    # Private Subnets
     PrivateSubnet1:
       Type: AWS::EC2::Subnet
       Properties:
@@ -146,15 +174,21 @@ resources:
           - Key: Name
             Value: ${self:service}-${self:provider.stage}-private-subnet-2
 
-    # Internet Gateway
-    InternetGateway:
-      Type: AWS::EC2::InternetGateway
-
-    AttachGateway:
-      Type: AWS::EC2::VPCGatewayAttachment
+    # NAT Gateway
+    NatGatewayEIP:
+      Type: AWS::EC2::EIP
+      DependsOn: AttachGateway
       Properties:
-        VpcId: !Ref MainVPC
-        InternetGatewayId: !Ref InternetGateway
+        Domain: vpc
+
+    NatGateway:
+      Type: AWS::EC2::NatGateway
+      Properties:
+        AllocationId: !GetAtt NatGatewayEIP.AllocationId
+        SubnetId: !Ref PublicSubnet1
+        Tags:
+          - Key: Name
+            Value: ${self:service}-${self:provider.stage}-nat
 
     # Route Tables
     PublicRouteTable:
@@ -179,11 +213,32 @@ resources:
         SubnetId: !Ref PublicSubnet1
         RouteTableId: !Ref PublicRouteTable
 
-    PublicSubnet2RouteTableAssociation:
+    PrivateRouteTable:
+      Type: AWS::EC2::RouteTable
+      Properties:
+        VpcId: !Ref MainVPC
+        Tags:
+          - Key: Name
+            Value: ${self:service}-${self:provider.stage}-private-rt
+
+    PrivateRoute:
+      Type: AWS::EC2::Route
+      Properties:
+        RouteTableId: !Ref PrivateRouteTable
+        DestinationCidrBlock: 0.0.0.0/0
+        NatGatewayId: !Ref NatGateway
+
+    PrivateSubnet1RouteTableAssociation:
       Type: AWS::EC2::SubnetRouteTableAssociation
       Properties:
-        SubnetId: !Ref PublicSubnet2
-        RouteTableId: !Ref PublicRouteTable
+        SubnetId: !Ref PrivateSubnet1
+        RouteTableId: !Ref PrivateRouteTable
+
+    PrivateSubnet2RouteTableAssociation:
+      Type: AWS::EC2::SubnetRouteTableAssociation
+      Properties:
+        SubnetId: !Ref PrivateSubnet2
+        RouteTableId: !Ref PrivateRouteTable
 
     # Security Groups
     LambdaSecurityGroup:
@@ -195,7 +250,7 @@ resources:
           - IpProtocol: -1
             FromPort: -1
             ToPort: -1
-            CidrIp: 0.0.0.0/0
+            CidrIp: 0.0.0.0/0  # Allow outbound internet access via NAT
 
     DBSecurityGroup:
       Type: AWS::EC2::SecurityGroup
@@ -206,12 +261,21 @@ resources:
           - IpProtocol: tcp
             FromPort: 5432
             ToPort: 5432
-            SourceSecurityGroupId: !Ref LambdaSecurityGroup
+            SourceSecurityGroupId: !Ref LambdaSecurityGroup  # Only allow access from Lambda
         SecurityGroupEgress:
           - IpProtocol: -1
             FromPort: -1
             ToPort: -1
             CidrIp: 0.0.0.0/0
+
+    # RDS Subnet Group
+    DBSubnetGroup:
+      Type: AWS::RDS::DBSubnetGroup
+      Properties:
+        DBSubnetGroupDescription: Subnet group for RDS instance
+        SubnetIds:
+          - !Ref PrivateSubnet1
+          - !Ref PrivateSubnet2
 
     # RDS Instance
     RDSInstance:
@@ -223,21 +287,16 @@ resources:
         AllocatedStorage: 20
         StorageType: gp2
         MasterUsername: ${self:custom.rds.username}
-        MasterUserPassword: ${ssm:/birthday-service/${self:provider.stage}/db/password}
+        MasterUserPassword: ${ssm:/birthday-greeting/${self:provider.stage}/db/password}
         VPCSecurityGroups:
           - !Ref DBSecurityGroup
         DBSubnetGroupName: !Ref DBSubnetGroup
-        PubliclyAccessible: false
+        PubliclyAccessible: false  # Private access only
         BackupRetentionPeriod: 7
         MultiAZ: false
+        Port: 5432
+        DBName: postgres  # Set initial database name
+        EnableIAMDatabaseAuthentication: false
         Tags:
           - Key: Name
             Value: ${self:service}-${self:provider.stage}-rds
-
-    DBSubnetGroup:
-      Type: AWS::RDS::DBSubnetGroup
-      Properties:
-        DBSubnetGroupDescription: Subnet group for RDS instance
-        SubnetIds:
-          - !Ref PrivateSubnet1
-          - !Ref PrivateSubnet2

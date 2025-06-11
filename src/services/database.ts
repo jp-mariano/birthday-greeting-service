@@ -13,7 +13,8 @@ export interface User {
 
 export class DatabaseService {
   private pool: Pool;
-  private static instance: DatabaseService;
+  private static instance: DatabaseService | null = null;
+  private isEnding: boolean = false;
 
   private constructor() {
     const config: PoolConfig = {
@@ -136,6 +137,11 @@ export class DatabaseService {
   }
 
   async cleanup(): Promise<void> {
+    if (this.isEnding) {
+      return;
+    }
+    this.isEnding = true;
     await this.pool.end();
+    DatabaseService.instance = null;
   }
 } 
