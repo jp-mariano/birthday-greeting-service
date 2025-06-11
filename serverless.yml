@@ -8,27 +8,16 @@ provider:
   name: aws
   runtime: nodejs20.x
   stage: ${opt:stage, 'dev'}
-  region: ${opt:region, 'us-east-1'}
-  
-  # LocalStack specific configuration
-  apiGateway:
-    shouldStartLocal: true
-  custom:
-    localstack:
-      stages:
-        - local
-      host: http://localhost
-      edgePort: 4566
+  region: ap-southeast-1
   
   environment:
-    USERS_TABLE: ${self:service}-users-${self:provider.stage}
-    MESSAGE_LOGS_TABLE: ${self:service}-logs-${self:provider.stage}
+    DB_HOST: ${self:custom.rds.host}
+    DB_PORT: ${self:custom.rds.port}
+    DB_NAME: ${self:custom.rds.database}
+    DB_USER: ${self:custom.rds.username}
+    # Use AWS Parameter Store for password in non-local environments
+    DB_PASSWORD: ${self:custom.rds.password}
     WEBHOOK_ENDPOINT: ${env:WEBHOOK_ENDPOINT, 'https://eog8uvm3yyo7caf.m.pipedream.net'}
-    DYNAMODB_ENDPOINT: ${env:DYNAMODB_ENDPOINT, 'http://localhost:4566'}
-    SCHEDULER_ENDPOINT: ${env:SCHEDULER_ENDPOINT, 'http://localhost:4566'}
-    EVENTBRIDGE_ENDPOINT: ${env:EVENTBRIDGE_ENDPOINT, 'http://localhost:4566'}
-    SCHEDULER_ROLE_ARN: ${env:SCHEDULER_ROLE_ARN, 'arn:aws:iam::000000000000:role/scheduler-role'}
-    SENDER_FUNCTION_ARN: !GetAtt BirthdayMessageSenderLambdaFunction.Arn
     IS_OFFLINE: ${env:IS_OFFLINE, 'false'}
 
   iam:
@@ -36,25 +25,10 @@ provider:
       statements:
         - Effect: Allow
           Action:
-            - dynamodb:Query
-            - dynamodb:Scan
-            - dynamodb:GetItem
-            - dynamodb:PutItem
-            - dynamodb:UpdateItem
-            - dynamodb:DeleteItem
+            - ssm:GetParameter
+            - ssm:GetParameters
           Resource: 
-            - !GetAtt UsersTable.Arn
-            - !GetAtt MessageLogsTable.Arn
-            - !Join ['/', [!GetAtt UsersTable.Arn, 'index/*']]
-        - Effect: Allow
-          Action:
-            - scheduler:CreateSchedule
-            - scheduler:DeleteSchedule
-            - events:PutRule
-            - events:DeleteRule
-            - events:PutTargets
-            - events:RemoveTargets
-          Resource: '*'
+            - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/birthday-service/${self:provider.stage}/*
 
 functions:
   userApi:
@@ -63,75 +37,25 @@ functions:
       - http:
           path: /users
           method: post
+          cors: true
       - http:
           path: /users/{userId}
           method: put
+          cors: true
       - http:
           path: /users/{userId}
           method: delete
+          cors: true
 
-  dailyAggregator:
-    handler: src/handlers/daily.handler
+  birthdayChecker:
+    handler: src/handlers/birthday.handler
     events:
-      - schedule:
-          rate: cron(0 10 * * ? *)
-          enabled: true
+      - schedule: rate(15 minutes)
+      # Keep HTTP endpoint for manual triggers
       - http:
-          path: /birthday/daily
+          path: /birthday/check
           method: post
-
-  birthdayMessageSender:
-    handler: src/handlers/sender.handler
-    events:
-      - http:
-          path: /birthday/send
-          method: post
-    
-resources:
-  Resources:
-    UsersTable:
-      Type: AWS::DynamoDB::Table
-      Properties:
-        TableName: ${self:provider.environment.USERS_TABLE}
-        BillingMode: PAY_PER_REQUEST
-        AttributeDefinitions:
-          - AttributeName: userId
-            AttributeType: S
-          - AttributeName: sk
-            AttributeType: S
-          - AttributeName: birthdayMD
-            AttributeType: S
-          - AttributeName: location
-            AttributeType: S
-        KeySchema:
-          - AttributeName: userId
-            KeyType: HASH
-          - AttributeName: sk
-            KeyType: RANGE
-        GlobalSecondaryIndexes:
-          - IndexName: birthdayIndex
-            KeySchema:
-              - AttributeName: birthdayMD
-                KeyType: HASH
-              - AttributeName: location
-                KeyType: RANGE
-            Projection:
-              ProjectionType: ALL
-
-    MessageLogsTable:
-      Type: AWS::DynamoDB::Table
-      Properties:
-        TableName: ${self:provider.environment.MESSAGE_LOGS_TABLE}
-        BillingMode: PAY_PER_REQUEST
-        AttributeDefinitions:
-          - AttributeName: messageId
-            AttributeType: S
-        KeySchema:
-          - AttributeName: messageId
-            KeyType: HASH
-        TimeToLiveSpecification:
-          AttributeName: ttl
-          Enabled: true
+          cors: true
 
 custom:
   esbuild:
@@ -153,3 +77,126 @@ custom:
     httpPort: 3000
     lambdaPort: 3002
     useChildProcesses: true
+
+  # RDS Configuration
+  rds:
+    host: ${ssm:/birthday-service/${self:provider.stage}/db/host, 'localhost'}
+    port: ${ssm:/birthday-service/${self:provider.stage}/db/port, '5432'}
+    database: ${ssm:/birthday-service/${self:provider.stage}/db/name, 'birthday_db'}
+    username: ${ssm:/birthday-service/${self:provider.stage}/db/username, 'postgres'}
+    password: ${ssm:/birthday-service/${self:provider.stage}/db/password, 'postgres'}
+
+  # VPC Configuration
+  vpc:
+    securityGroupIds:
+      - !Ref LambdaSecurityGroup
+    subnetIds:
+      - !Ref PublicSubnet1
+      - !Ref PublicSubnet2
+
+resources:
+  Resources:
+    # VPC Resources
+    MainVPC:
+      Type: AWS::EC2::VPC
+      Properties:
+        CidrBlock: 10.0.0.0/16
+        EnableDnsHostnames: true
+        EnableDnsSupport: true
+        Tags:
+          - Key: Name
+            Value: ${self:service}-${self:provider.stage}
+
+    # Public Subnets (for Lambda)
+    PublicSubnet1:
+      Type: AWS::EC2::Subnet
+      Properties:
+        VpcId: !Ref MainVPC
+        AvailabilityZone: ${self:provider.region}a
+        CidrBlock: 10.0.1.0/24
+        MapPublicIpOnLaunch: true
+
+    PublicSubnet2:
+      Type: AWS::EC2::Subnet
+      Properties:
+        VpcId: !Ref MainVPC
+        AvailabilityZone: ${self:provider.region}b
+        CidrBlock: 10.0.2.0/24
+        MapPublicIpOnLaunch: true
+
+    # Private Subnet (for RDS)
+    PrivateSubnet1:
+      Type: AWS::EC2::Subnet
+      Properties:
+        VpcId: !Ref MainVPC
+        AvailabilityZone: ${self:provider.region}a
+        CidrBlock: 10.0.3.0/24
+
+    # Internet Gateway
+    InternetGateway:
+      Type: AWS::EC2::InternetGateway
+
+    AttachGateway:
+      Type: AWS::EC2::VPCGatewayAttachment
+      Properties:
+        VpcId: !Ref MainVPC
+        InternetGatewayId: !Ref InternetGateway
+
+    # Route Tables
+    PublicRouteTable:
+      Type: AWS::EC2::RouteTable
+      Properties:
+        VpcId: !Ref MainVPC
+
+    PublicRoute:
+      Type: AWS::EC2::Route
+      DependsOn: AttachGateway
+      Properties:
+        RouteTableId: !Ref PublicRouteTable
+        DestinationCidrBlock: 0.0.0.0/0
+        GatewayId: !Ref InternetGateway
+
+    # Security Groups
+    LambdaSecurityGroup:
+      Type: AWS::EC2::SecurityGroup
+      Properties:
+        GroupDescription: Security group for Lambda functions
+        VpcId: !Ref MainVPC
+        SecurityGroupEgress:
+          - IpProtocol: -1
+            FromPort: -1
+            ToPort: -1
+            CidrIp: 0.0.0.0/0
+
+    RDSSecurityGroup:
+      Type: AWS::EC2::SecurityGroup
+      Properties:
+        GroupDescription: Security group for RDS instance
+        VpcId: !Ref MainVPC
+        SecurityGroupIngress:
+          - IpProtocol: tcp
+            FromPort: 5432
+            ToPort: 5432
+            SourceSecurityGroupId: !Ref LambdaSecurityGroup
+
+    # RDS Instance
+    BirthdayDB:
+      Type: AWS::RDS::DBInstance
+      Properties:
+        Engine: postgres
+        DBInstanceClass: db.t3.micro
+        AllocatedStorage: 20
+        DBName: ${self:custom.rds.database}
+        MasterUsername: ${self:custom.rds.username}
+        MasterUserPassword: ${self:custom.rds.password}
+        VPCSecurityGroups:
+          - !Ref RDSSecurityGroup
+        DBSubnetGroupName: !Ref DBSubnetGroup
+        PubliclyAccessible: false
+
+    DBSubnetGroup:
+      Type: AWS::RDS::DBSubnetGroup
+      Properties:
+        DBSubnetGroupDescription: Subnet group for Birthday Service RDS
+        SubnetIds:
+          - !Ref PrivateSubnet1

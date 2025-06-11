@@ -1,40 +1,41 @@
 import { APIGatewayProxyEvent, APIGatewayProxyResult, Context } from 'aws-lambda';
-import { DynamoDBService } from '../services/dynamodb';
-import { SchedulerService } from '../services/scheduler';
-import { CreateUserRequestSchema } from '../types/models';
-import { DateTime } from 'luxon';
-import { ZodError } from 'zod';
+import { DatabaseService } from '../services/database';
+import { z } from 'zod';
+
+// Schema for user creation/update
+const UserSchema = z.object({
+  firstName: z.string().min(1),
+  lastName: z.string().min(1),
+  birthday: z.string().refine(val => !isNaN(Date.parse(val)), {
+    message: "Birthday must be a valid date"
+  }),
+  location: z.string().refine(val => {
+    try {
+      Intl.DateTimeFormat(undefined, { timeZone: val });
+      return true;
+    } catch (e) {
+      return false;
+    }
+  }, {
+    message: "Must be a valid IANA timezone"
+  })
+});
 
 export const handler = async (
   event: APIGatewayProxyEvent,
   _context: Context
 ): Promise<APIGatewayProxyResult> => {
-  // Create service instances inside the handler
-  const dbService = new DynamoDBService();
-  const schedulerService = new SchedulerService();
+  const db = DatabaseService.getInstance();
 
   try {
     switch (event.httpMethod) {
       case 'POST': {
-        const userData = CreateUserRequestSchema.parse(JSON.parse(event.body!));
-        const user = await dbService.createUser(userData);
-
-        // Check if the user's birthday is today, if so create a schedule
-        const today = DateTime.utc().toFormat('yyyy-MM-dd');
-        const userBirthdayMD = DateTime.fromISO(userData.birthday).toFormat('MM-dd');
-        const todayMD = DateTime.fromISO(today).toFormat('MM-dd');
-
-        if (userBirthdayMD === todayMD) {
-          console.log('User birthday is today, creating schedule...');
-          const message = {
-            userId: user.userId,
-            firstName: user.firstName,
-            lastName: user.lastName,
-            location: user.location
-          };
-          await schedulerService.scheduleMessage(message, today);
-          console.log('Schedule created successfully');
-        }
+        const userData = UserSchema.parse(JSON.parse(event.body!));
+        
+        const user = await db.createUser({
+          ...userData,
+          birthday: new Date(userData.birthday)
+        });
 
         return {
           statusCode: 201,
@@ -51,15 +52,12 @@ export const handler = async (
           };
         }
 
-        const updates = CreateUserRequestSchema.parse(JSON.parse(event.body!));
-        const user = await dbService.updateUser(userId, updates);
-
-        // If birthday was updated, delete existing schedule
-        const today = DateTime.utc().toFormat('yyyy-MM-dd');
-        const messageLog = await dbService.getMessageLog(`${userId}_${today}`);
-        if (messageLog) {
-          await schedulerService.deleteSchedule(userId, today);
-        }
+        const updates = UserSchema.partial().parse(JSON.parse(event.body!));
+        
+        const user = await db.updateUser(userId, {
+          ...updates,
+          birthday: updates.birthday ? new Date(updates.birthday) : undefined
+        });
 
         return {
           statusCode: 200,
@@ -76,14 +74,7 @@ export const handler = async (
           };
         }
 
-        await dbService.deleteUser(userId);
-
-        // Delete any existing schedule
-        const today = DateTime.utc().toFormat('yyyy-MM-dd');
-        const messageLog = await dbService.getMessageLog(`${userId}_${today}`);
-        if (messageLog) {
-          await schedulerService.deleteSchedule(userId, today);
-        }
+        await db.deleteUser(userId);
 
         return {
           statusCode: 204,
@@ -98,41 +89,33 @@ export const handler = async (
         };
     }
   } catch (error) {
-    console.error('Error processing request:', error);
+    console.error('Error processing user request:', error);
 
-    if (error instanceof ZodError) {
+    if (error instanceof z.ZodError) {
       return {
         statusCode: 400,
-        body: JSON.stringify({ error: 'Invalid request data', details: error.errors })
+        body: JSON.stringify({
+          error: 'Validation error',
+          details: error.errors
+        })
       };
     }
 
-    if (error instanceof Error) {
-      if (error.message.includes('not found')) {
-        return {
-          statusCode: 404,
-          body: JSON.stringify({ error: error.message })
-        };
-      }
-
-      if (error.message.includes('already exists')) {
-        return {
-          statusCode: 409,
-          body: JSON.stringify({ error: error.message })
-        };
-      }
-
-      if (error.message === 'Unexpected end of JSON input' || error.message.includes('JSON')) {
-        return {
-          statusCode: 400,
-          body: JSON.stringify({ error: 'Invalid JSON in request body' })
-        };
-      }
+    if (error instanceof Error && error.message === 'User not found') {
+      return {
+        statusCode: 404,
+        body: JSON.stringify({ error: 'User not found' })
+      };
     }
 
     return {
       statusCode: 500,
-      body: JSON.stringify({ error: 'Internal server error' })
+      body: JSON.stringify({
+        error: 'Internal server error',
+        details: error instanceof Error ? error.message : 'Unknown error'
+      })
     };
+  } finally {
+    await db.cleanup();
   }
 }; 
