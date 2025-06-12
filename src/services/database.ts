@@ -144,6 +144,21 @@ export class DatabaseService {
     }
   }
 
+  async canSendGreeting(userId: string): Promise<boolean> {
+    const query = `
+      SELECT id
+      FROM users
+      WHERE id = $1
+      AND (
+        last_greeting_sent_at IS NULL 
+        OR EXTRACT(YEAR FROM (last_greeting_sent_at AT TIME ZONE location)) < EXTRACT(YEAR FROM (NOW() AT TIME ZONE location))
+      )
+    `;
+    
+    const result = await this.pool.query(query, [userId]);
+    return result.rows.length > 0;
+  }
+
   async cleanup(): Promise<void> {
     if (this.isEnding) {
       return;

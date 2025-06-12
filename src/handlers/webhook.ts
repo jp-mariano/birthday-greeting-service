@@ -37,6 +37,13 @@ export const handler = async (
 async function processWebhook(message: WebhookMessage): Promise<void> {
   const db = DatabaseService.getInstance();
   try {
+    // Check if we can send a greeting before making the API call
+    const canSend = await db.canSendGreeting(message.userId);
+    if (!canSend) {
+      console.log(`Skipping greeting for user ${message.userId} - already sent this year`);
+      return;
+    }
+
     const response = await fetch(process.env.WEBHOOK_ENDPOINT!, {
       method: 'POST',
       headers: {
@@ -49,18 +56,9 @@ async function processWebhook(message: WebhookMessage): Promise<void> {
       throw new Error(`Webhook failed with status ${response.status}`);
     }
 
-    // Only update last_greeting_sent_at after successful webhook
-    try {
-      await db.updateLastGreetingSent(message.userId);
-      console.log(`Successfully sent webhook and updated greeting timestamp for user ${message.firstName} ${message.lastName}`);
-    } catch (error) {
-      if (error instanceof Error && error.message === 'User not found or greeting already sent this year') {
-        console.log(`Skipping timestamp update for user ${message.userId}: ${error.message}`);
-      } else {
-        // If we can't update the timestamp, we should still consider this a failure
-        throw error;
-      }
-    }
+    // Only update the database if webhook was successful
+    await db.updateLastGreetingSent(message.userId);
+    console.log(`Successfully sent webhook and updated greeting timestamp for user ${message.firstName} ${message.lastName}`);
   } catch (error) {
     console.error(`Failed to send webhook for user ${message.userId}:`, error);
     // The message will be moved to DLQ after max retries (configured in SQS)
