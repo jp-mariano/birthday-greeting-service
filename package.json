@@ -22,12 +22,16 @@
     "zod": "^3.22.4"
   },
   "devDependencies": {
+    "@jest/globals": "^30.0.0",
     "@types/aws-lambda": "^8.10.0",
+    "@types/jest": "^29.5.14",
     "@types/node": "^20.0.0",
     "esbuild": "^0.19.0",
+    "jest": "^30.0.0",
     "serverless": "^3.0.0",
     "serverless-esbuild": "^1.0.0",
     "serverless-offline": "^13.0.0",
+    "ts-jest": "^29.4.0",
     "typescript": "^5.0.0"
   }
 }
