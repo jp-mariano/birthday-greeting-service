@@ -13,7 +13,7 @@ interface WebhookMessage {
   message: string;
 }
 
-function chunkArray<T>(array: T[], size: number): T[][] {
+export function chunkArray<T>(array: T[], size: number): T[][] {
   return Array.from({ length: Math.ceil(array.length / size) }, (_, i) =>
     array.slice(i * size, i * size + size)
   );
@@ -38,6 +38,11 @@ export const handler = async (
       location: user.location,
       message: `Hey, ${user.firstName} ${user.lastName} it's your birthday`
     }));
+
+    // If no messages, return early
+    if (messages.length === 0) {
+      return;
+    }
 
     // Split messages into chunks of BATCH_SIZE
     const messageChunks = chunkArray(messages, BATCH_SIZE);
