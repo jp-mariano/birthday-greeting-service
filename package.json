@@ -13,7 +13,10 @@
     "deploy:dev": "serverless deploy --stage dev",
     "deploy:prod": "serverless deploy --stage prod",
     "lint": "tsc --noEmit",
-    "clean": "rm -rf .serverless .build .esbuild node_modules"
+    "clean": "rm -rf .serverless .build .esbuild node_modules",
+    "test": "jest",
+    "test:watch": "jest --watch",
+    "test:coverage": "jest --coverage"
   },
   "dependencies": {
     "@aws-sdk/client-sqs": "^3.515.0",
