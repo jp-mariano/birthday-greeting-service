@@ -1,5 +1,5 @@
 import { APIGatewayProxyEvent, Context, ScheduledEvent } from 'aws-lambda';
-import { SQSClient, SendMessageCommand } from '@aws-sdk/client-sqs';
+import { SendMessageCommand } from '@aws-sdk/client-sqs';
 import { DatabaseService } from '../../services/database';
 import { handler } from '../../handlers/birthday';
 

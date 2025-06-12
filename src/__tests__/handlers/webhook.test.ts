@@ -1,5 +1,5 @@
-import { Context, SQSEvent, SQSRecord } from 'aws-lambda';
-import { SQSClient, DeleteMessageCommand, GetQueueAttributesCommand, ReceiveMessageCommand } from '@aws-sdk/client-sqs';
+import { Context, SQSEvent } from 'aws-lambda';
+import { DeleteMessageCommand, GetQueueAttributesCommand, ReceiveMessageCommand } from '@aws-sdk/client-sqs';
 import { DatabaseService } from '../../services/database';
 import { handler } from '../../handlers/webhook';
 import { ScheduledEvent } from 'aws-lambda';

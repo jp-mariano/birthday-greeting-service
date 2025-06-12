@@ -1,5 +1,5 @@
 import { jest } from '@jest/globals';
-import { Pool, QueryResult } from 'pg';
+import { QueryResult } from 'pg';
 import { DatabaseService } from '../../services/database';
 
 // Mock environment variables
