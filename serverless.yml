@@ -40,16 +40,31 @@ provider:
             - ec2:AssignPrivateIpAddresses
             - ec2:UnassignPrivateIpAddresses
           Resource: "*"
+        # SQS permissions for birthday checker
         - Effect: Allow
           Action:
-            - sqs:SendMessage
+            - sqs:SendMessageBatch
+          Resource:
+            - !GetAtt WebhookQueue.Arn
+        # SQS permissions for webhook sender
+        - Effect: Allow
+          Action:
+            - sqs:DeleteMessage
+            - sqs:GetQueueUrl
+            - sqs:ReceiveMessage
+          Resource:
+            - !GetAtt WebhookQueue.Arn
+        # SQS permissions for webhook retry
+        - Effect: Allow
+          Action:
             - sqs:DeleteMessage
             - sqs:GetQueueUrl
             - sqs:ReceiveMessage
             - sqs:GetQueueAttributes
-          Resource: 
-            - !GetAtt WebhookQueue.Arn
+            - sqs:SendMessage
+          Resource:
             - !GetAtt WebhookDLQ.Arn
+            - !GetAtt WebhookQueue.Arn
 
 functions:
   userApi:
@@ -74,11 +89,6 @@ functions:
     timeout: 30 # Function-specific timeout
     events:
       - schedule: cron(0,15,30,45 * * * ? *)  # Run at minute 0, 15, 30, and 45 of every hour
-      # Keep HTTP endpoint for manual triggers
-      - http:
-          path: /birthday/check
-          method: post
-          cors: true
 
   webhookSender:
     handler: src/handlers/webhook.handler
@@ -87,9 +97,13 @@ functions:
       - sqs:
           arn: !GetAtt WebhookQueue.Arn
           batchSize: 1  # Process one message at a time to handle failures individually
-      # Retry failed webhooks every hour
-      - schedule: cron(0 * * * ? *)
-          
+
+  webhookRetry:
+    handler: src/handlers/webhookRetry.handler
+    timeout: 30
+    events:
+      - schedule: cron(0 * * * ? *)  # Run every hour
+
   initDb:
     handler: scripts/init-db.handler
     timeout: 30
@@ -330,6 +344,8 @@ resources:
         QueueName: ${self:service}-${self:provider.stage}-webhook-queue
         VisibilityTimeout: 30  # Time a message is invisible after being picked up
         MessageRetentionPeriod: 1209600  # 14 days
+        # Configure for batch operations
+        MaximumMessageSize: 262144  # 256 KB (max allowed)
         RedrivePolicy:
           deadLetterTargetArn: !GetAtt WebhookDLQ.Arn
           maxReceiveCount: 3  # Number of retries before message is moved to DLQ

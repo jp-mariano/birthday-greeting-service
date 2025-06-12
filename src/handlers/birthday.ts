@@ -1,13 +1,28 @@
-import { APIGatewayProxyEvent, APIGatewayProxyResult, Context, ScheduledEvent } from 'aws-lambda';
-import { SQSClient, SendMessageCommand } from '@aws-sdk/client-sqs';
+import { ScheduledEvent, Context } from 'aws-lambda';
+import { SQSClient, SendMessageBatchCommand } from '@aws-sdk/client-sqs';
 import { DatabaseService } from '../services/database';
 
 const sqs = new SQSClient({});
+const BATCH_SIZE = 200; // Number of records per message
+
+interface WebhookMessage {
+  userId: string;
+  firstName: string;
+  lastName: string;
+  location: string;
+  message: string;
+}
+
+function chunkArray<T>(array: T[], size: number): T[][] {
+  return Array.from({ length: Math.ceil(array.length / size) }, (_, i) =>
+    array.slice(i * size, i * size + size)
+  );
+}
 
 export const handler = async (
-  event: APIGatewayProxyEvent | ScheduledEvent,
+  _event: ScheduledEvent,
   _context: Context
-): Promise<void | APIGatewayProxyResult> => {
+): Promise<void> => {
   const db = DatabaseService.getInstance();
 
   try {
@@ -15,62 +30,40 @@ export const handler = async (
     const usersToGreet = await db.getUsersWithBirthdayNow();
     console.log(`Found ${usersToGreet.length} users to send birthday greetings to`);
 
-    // Send messages to SQS for webhook processing
-    for (const user of usersToGreet) {
-      try {
-        await sqs.send(
-          new SendMessageCommand({
-            QueueUrl: process.env.WEBHOOK_QUEUE_URL!,
-            MessageBody: JSON.stringify({
-              userId: user.id,
-              firstName: user.firstName,
-              lastName: user.lastName,
-              location: user.location,
-              message: `Hey, ${user.firstName} ${user.lastName} it's your birthday`
-            })
+    // Convert users to webhook messages
+    const messages: WebhookMessage[] = usersToGreet.map(user => ({
+      userId: user.id,
+      firstName: user.firstName,
+      lastName: user.lastName,
+      location: user.location,
+      message: `Hey, ${user.firstName} ${user.lastName} it's your birthday`
+    }));
+
+    // Split messages into chunks of BATCH_SIZE
+    const messageChunks = chunkArray(messages, BATCH_SIZE);
+
+    // Send all chunks in a single batch operation
+    const response = await sqs.send(
+      new SendMessageBatchCommand({
+        QueueUrl: process.env.WEBHOOK_QUEUE_URL!,
+        Entries: messageChunks.map((chunk, index) => ({
+          Id: `batch-${index}`,
+          MessageBody: JSON.stringify({
+            records: chunk
           })
-        );
+        }))
+      })
+    );
 
-        console.log(`Successfully queued birthday greeting for ${user.firstName} ${user.lastName}`);
-      } catch (error) {
-        console.error(`Failed to queue greeting for user ${user.id}:`, error);
-        // Continue with next user even if one fails
-      }
+    if (response.Failed && response.Failed.length > 0) {
+      console.error('Failed to queue some batches:', response.Failed);
     }
 
-    // If this was triggered by HTTP request, return a response
-    if ('httpMethod' in event) {
-      return {
-        statusCode: 200,
-        body: JSON.stringify({
-          message: `Successfully queued ${usersToGreet.length} birthday greetings`,
-          users: usersToGreet.map(u => ({
-            id: u.id,
-            firstName: u.firstName,
-            lastName: u.lastName,
-            location: u.location
-          }))
-        })
-      };
-    }
+    console.log(`Successfully queued ${response.Successful?.length ?? 0} batches of messages`);
   } catch (error) {
     console.error('Error processing birthday greetings:', error);
-    
-    // If this was triggered by HTTP request, return an error response
-    if ('httpMethod' in event) {
-      return {
-        statusCode: 500,
-        body: JSON.stringify({
-          error: 'Failed to process birthday greetings',
-          details: error instanceof Error ? error.message : 'Unknown error'
-        })
-      };
-    }
-
-    // For scheduled events, we should rethrow to trigger the Lambda retry
     throw error;
   } finally {
-    // Cleanup database connections
     await db.cleanup();
   }
 }; 
