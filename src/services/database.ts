@@ -103,20 +103,11 @@ export class DatabaseService {
           last_greeting_sent_at IS NULL 
           OR last_greeting_sent_at < (NOW() AT TIME ZONE location)::date
         )
+      FOR UPDATE SKIP LOCKED  -- Add row-level locking but skip locked rows
     `;
 
     const result = await this.pool.query(query);
     return result.rows.map(this.mapRowToUser);
-  }
-
-  async markGreetingSent(userId: string): Promise<void> {
-    const query = `
-      UPDATE users
-      SET last_greeting_sent_at = NOW()
-      WHERE id = $1
-    `;
-
-    await this.pool.query(query, [userId]);
   }
 
   private mapRowToUser(row: any): User {
@@ -134,6 +125,23 @@ export class DatabaseService {
 
   private toSnakeCase(str: string): string {
     return str.replace(/[A-Z]/g, letter => `_${letter.toLowerCase()}`);
+  }
+
+  async updateLastGreetingSent(userId: string): Promise<void> {
+    const query = `
+      UPDATE users
+      SET last_greeting_sent_at = NOW()
+      WHERE id = $1
+      AND (
+        last_greeting_sent_at IS NULL 
+        OR EXTRACT(YEAR FROM (last_greeting_sent_at AT TIME ZONE location)) < EXTRACT(YEAR FROM (NOW() AT TIME ZONE location))
+      )
+    `;
+    
+    const result = await this.pool.query(query, [userId]);
+    if (result.rowCount === 0) {
+      throw new Error('User not found or greeting already sent this year');
+    }
   }
 
   async cleanup(): Promise<void> {

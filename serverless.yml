@@ -20,6 +20,8 @@ provider:
     DB_PASSWORD: ${ssm:/birthday-greeting/${self:provider.stage}/db/password}
     WEBHOOK_ENDPOINT: ${env:WEBHOOK_ENDPOINT, 'https://eog8uvm3yyo7caf.m.pipedream.net'}
     IS_OFFLINE: ${env:IS_OFFLINE, 'false'}
+    WEBHOOK_QUEUE_URL: !Ref WebhookQueue
+    WEBHOOK_DLQ_URL: !Ref WebhookDLQ
 
   iam:
     role:
@@ -38,6 +40,16 @@ provider:
             - ec2:AssignPrivateIpAddresses
             - ec2:UnassignPrivateIpAddresses
           Resource: "*"
+        - Effect: Allow
+          Action:
+            - sqs:SendMessage
+            - sqs:DeleteMessage
+            - sqs:GetQueueUrl
+            - sqs:ReceiveMessage
+            - sqs:GetQueueAttributes
+          Resource: 
+            - !GetAtt WebhookQueue.Arn
+            - !GetAtt WebhookDLQ.Arn
 
 functions:
   userApi:
@@ -68,6 +80,16 @@ functions:
           method: post
           cors: true
 
+  webhookSender:
+    handler: src/handlers/webhook.handler
+    timeout: 30
+    events:
+      - sqs:
+          arn: !GetAtt WebhookQueue.Arn
+          batchSize: 1  # Process one message at a time to handle failures individually
+      # Retry failed webhooks every hour
+      - schedule: cron(0 * * * ? *)
+          
   initDb:
     handler: scripts/init-db.handler
     timeout: 30
@@ -300,3 +322,21 @@ resources:
         Tags:
           - Key: Name
             Value: ${self:service}-${self:provider.stage}-rds
+
+    # SQS Queue for Webhook Processing
+    WebhookQueue:
+      Type: AWS::SQS::Queue
+      Properties:
+        QueueName: ${self:service}-${self:provider.stage}-webhook-queue
+        VisibilityTimeout: 30  # Time a message is invisible after being picked up
+        MessageRetentionPeriod: 1209600  # 14 days
+        RedrivePolicy:
+          deadLetterTargetArn: !GetAtt WebhookDLQ.Arn
+          maxReceiveCount: 3  # Number of retries before message is moved to DLQ
+
+    # Dead Letter Queue for Failed Webhooks
+    WebhookDLQ:
+      Type: AWS::SQS::Queue
+      Properties:
+        QueueName: ${self:service}-${self:provider.stage}-webhook-dlq
+        MessageRetentionPeriod: 1209600  # 14 days
